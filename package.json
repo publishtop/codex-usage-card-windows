@@ -1,0 +1,13 @@
+{
+  "name": "codex-usage-card-windows",
+  "version": "0.9.4-win.9",
+  "private": true,
+  "description": "Community Windows port of Lorie7813/codex-usage-card",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.cjs"
+  }
+}
