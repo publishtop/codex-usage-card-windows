@@ -97,8 +97,38 @@ function quotaTone(percent) {
   return !Number.isFinite(percent) ? 'muted' : percent < 10 ? 'danger' : percent <= 50 ? 'warning' : 'normal';
 }
 function unavailableValue(current, title = '暂时无法读取 Codex 用量，正在自动重试') {
-  return { ...current, percent: null, title, tone: 'muted', stale: true,
+  return { ...current, percent: null, title, tone: 'muted', stale: true, refreshError: null,
     rings: current?.rings?.map(ring => ({ ...ring, percent: null, tone: 'muted', title: `${ring.label}：暂不可用` })) ?? null };
+}
+function usageErrorKind(error) {
+  const message = String(error?.message ?? '');
+  if (/\b(401|403|unauthorized|unauthenticated)\b|authentication required|not (?:logged|signed) in|token.*(?:expired|invalid)|log(?:in|ged out).*required/i.test(message)) return 'authentication';
+  if (/timed? out|timeout/i.test(message)) return 'timeout';
+  if (/\b429\b|too many requests/i.test(message)) return 'throttled';
+  return 'connection';
+}
+function usageErrorInfo(error) {
+  const text = String(error?.message ?? '');
+  const status = text.match(/\b(401|403|429|500|502|503|504)\b/)?.[1];
+  const hint = status ? `http-${status}` : /error sending request|fetch failed|failed to connect/i.test(text) ? 'network-request' :
+    /dns|resolve.*host/i.test(text) ? 'dns' : /certificate|tls|ssl/i.test(text) ? 'tls' : /timed? out|timeout/i.test(text) ? 'read-timeout' : 'request-failed';
+  return { kind: usageErrorKind(error), hint, rpcCode: Number.isInteger(error?.code) ? error.code : null };
+}
+function usageRetryDelayMs(error, failures = 1) {
+  const kind = usageErrorKind(error);
+  if (kind === 'authentication' || kind === 'throttled') return 60000;
+  return Math.min(10000, 3000 * 2 ** Math.min(5, Math.max(0, failures - 1)));
+}
+function valueAfterReadFailure(current, error, now = Date.now()) {
+  const kind = usageErrorKind(error);
+  const known = Number.isFinite(current?.percent) || current?.rings?.some(ring => Number.isFinite(ring.percent));
+  // A transient failure cannot erase a recent verified read or renew its timestamp.
+  if (kind !== 'authentication' && known && !current.stale && Number.isFinite(current.updatedAt) &&
+      now >= current.updatedAt && now - current.updatedAt < 30000) return { ...current, refreshError: kind };
+  const title = kind === 'authentication' ? '用量登录状态失效，请在 Codex 中重新登录' :
+    kind === 'timeout' ? '用量读取超时，正在自动重试' :
+    kind === 'throttled' ? '用量接口暂时限流，正在自动重试' : '暂时无法读取 Codex 用量，正在自动重试';
+  return unavailableValue(current, title);
 }
 function formatRateLimits(response) {
   const single = formatPrimaryRateLimits(response);
@@ -124,13 +154,13 @@ function formatRateLimits(response) {
 }
 
 class AppServerClient extends require('node:events').EventEmitter {
-  constructor({command='codex', args=['app-server', '--stdio'], requestTimeoutMs=10000}={}) {
-    super(); Object.assign(this,{command,args,requestTimeoutMs});
+  constructor({command='codex', args=['app-server', '--stdio'], requestTimeoutMs=10000, env=process.env}={}) {
+    super(); Object.assign(this,{command,args,requestTimeoutMs,env});
     this.child=null; this.lines=null; this.pending=new Map(); this.serial=0; this.rateLimits=null;
   }
   async start() {
     if (this.child) return;
-    const child=require('node:child_process').spawn(this.command,this.args,{stdio:['pipe','pipe','pipe'],windowsHide: true,env:process.env});
+    const child=require('node:child_process').spawn(this.command,this.args,{stdio:['pipe','pipe','pipe'],windowsHide: true,env:this.env});
     this.child=child;
     child.stdout.setEncoding('utf8');
     const fail=error=>{
@@ -148,7 +178,7 @@ class AppServerClient extends require('node:events').EventEmitter {
       const request=this.pending.get(message.id);
       if (request) {
         this.pending.delete(message.id); clearTimeout(request.timer);
-        message.error ? request.reject(new Error(message.error.message || 'App Server request failed')) : request.resolve(message.result);
+        message.error ? request.reject(Object.assign(new Error(message.error.message || 'App Server request failed'), { code: message.error.code })) : request.resolve(message.result);
       } else if(message.method==='account/rateLimits/updated') {
         this.rateLimits=mergeRateLimitsResponse(this.rateLimits,message.params);
         this.emit('rate-limits',this.rateLimits);
@@ -184,7 +214,7 @@ class AppServerClient extends require('node:events').EventEmitter {
 }
 
 function installUsageBadge() {
-  const VERSION = 54;
+  const VERSION = 55;
   const KEY = '__codexUsageBadge';
   if (window[KEY]?.version === VERSION) {
     window[KEY].place();
@@ -444,6 +474,7 @@ function installUsageBadge() {
     }
     tooltip.replaceChildren(heading, sections);
     if (Number.isFinite(value.updatedAt)) metadata.push(`最近成功读取：${new Date(value.updatedAt).toLocaleTimeString('zh-CN', { hour12: false })} · 每10秒刷新`);
+    if (value.refreshError && !value.stale) metadata.push('更新暂时延迟，正在重试；当前显示最近30秒内的读取结果');
     if (metadata.length) {
       const footer = document.createElement('div');
       footer.className = 'usage-tooltip-metadata';
@@ -659,7 +690,7 @@ function windowsCodexCandidates(appPath) {
     path.join(root, 'resources', 'codex-cli', 'codex.exe')];
 }
 
-var AGENT_VERSION = '0.9.4-win.9';
+var AGENT_VERSION = '0.9.4-win.10';
 
 function parseArgs(argv) {
   const options = {
@@ -816,6 +847,10 @@ module.exports = {
   installUsageBadge,
   formatRateLimits,
   unavailableValue,
+  usageErrorKind,
+  usageErrorInfo,
+  usageRetryDelayMs,
+  valueAfterReadFailure,
   isMainWindow,
   resolveCodexBin,
   AppServerClient,

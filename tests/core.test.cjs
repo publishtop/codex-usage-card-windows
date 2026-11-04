@@ -63,9 +63,9 @@ test('real JSONL process transport handles Chinese metadata and permits only usa
     await assert.rejects(client.request('thread/list'), /only permits/);
   } finally { client.stop(); }
 });
-test('verification requires matching, fresh, non-duplicate native UI', () => {
+test('retiring the old companion requires matching, fresh, non-duplicate native UI', () => {
   const value = { ...formatRateLimits(snapshot()), updatedAt: Date.now() };
-  const status = { ...value, version: 54, placed: true, stale: false, badgeCount: 1 };
+  const status = { ...value, version: 55, placed: true, stale: false, badgeCount: 1 };
   assert.equal(cardMatches(status, value), true);
   assert.equal(cardMatches({ ...status, badgeCount: 2 }, value), false);
   assert.equal(cardMatches({ ...status, placed: false }, value), false);

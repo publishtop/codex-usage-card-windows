@@ -5,7 +5,7 @@ const os = require('node:os');
 const { execFileSync, spawn } = require('node:child_process');
 
 const OWNER = 'codex-usage-card-windows-v1';
-const VERSION = '0.9.4-win.9';
+const VERSION = '0.9.4-win.10';
 const PORT = 39222;
 const installRoot = () => path.resolve(process.env.CODEX_USAGE_CARD_HOME || path.join(os.homedir(), '.codex', 'addons', 'codex-usage-card'));
 const powershellPath = () => path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
@@ -51,6 +51,38 @@ ConvertTo-Json -InputObject $items -Compress
 }
 function executable(file) {
   try { return typeof file === 'string' && fs.statSync(file).isFile(); } catch { return false; }
+}
+function quotaNetworkConfig(environment = process.env, system = {}) {
+  const env = { ...environment };
+  const explicit = Object.keys(env).some(key => /^(https?_proxy|all_proxy)$/i.test(key) && env[key]);
+  let source = explicit ? 'environment' : 'default';
+  if (!explicit && Number(system.enabled) === 1 && !system.hasPac && typeof system.server === 'string') {
+    const parts = system.server.trim().split(';').filter(Boolean);
+    const mapped = Object.fromEntries(parts.filter(part => part.includes('=')).map(part => {
+      const at = part.indexOf('='); return [part.slice(0, at).trim().toLowerCase(), part.slice(at + 1).trim()];
+    }));
+    const address = mapped.https || mapped.http || (parts.length === 1 && !parts[0].includes('=') ? parts[0] : null);
+    if (address && !/[\s\x00-\x1f]/.test(address)) {
+      try {
+        const url = new URL(address.includes('://') ? address : `http://${address}`);
+        if (['http:', 'https:'].includes(url.protocol) && url.hostname && url.pathname === '/' && !url.search && !url.hash) {
+          env.HTTP_PROXY = url.href; env.HTTPS_PROXY = url.href;
+          source = 'windows-static';
+        }
+      } catch { /* Unsupported settings retain the CLI's existing route resolution. */ }
+    }
+  }
+  // Pin only this quota subprocess to the already-configured explicit proxy.
+  // The native app and global proxy/configuration remain untouched; PAC is not flattened.
+  const args = source === 'default' ? ['app-server', '--stdio'] : ['-c', 'features.respect_system_proxy=false', 'app-server', '--stdio'];
+  return { env, args, source };
+}
+function discoverQuotaNetwork(environment = process.env) {
+  let system = {};
+  try {
+    system = JSON.parse(powershell(`$ErrorActionPreference='Stop'; $p=Get-ItemProperty -LiteralPath 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'; [pscustomobject]@{enabled=$p.ProxyEnable;server=$p.ProxyServer;hasPac=[bool]$p.AutoConfigURL} | ConvertTo-Json -Compress`, {}, 5000));
+  } catch { /* Environment proxy or the CLI's own system resolver remains available. */ }
+  return quotaNetworkConfig(environment, system);
 }
 function isOwnedWorker(pid,root=installRoot()) {
   if(!Number.isInteger(pid)||pid<=0)return false;
@@ -119,4 +151,4 @@ $info=Get-ScheduledTaskInfo -TaskPath '\\CodexUsageCard\\' -TaskName 'Agent'
 `));
   } catch { return { state: 'Unavailable' }; }
 }
-module.exports = { OWNER, VERSION, PORT, installRoot, powershellPath, powershell, readJson, writeJson, requireOwnership, executable, isOwnedWorker, listRunningCodex, chooseEnvironmentPaths, discoverEnvironment, launchDesktop, launchArguments, taskStatus };
+module.exports = { OWNER, VERSION, PORT, installRoot, powershellPath, powershell, readJson, writeJson, requireOwnership, executable, quotaNetworkConfig, discoverQuotaNetwork, isOwnedWorker, listRunningCodex, chooseEnvironmentPaths, discoverEnvironment, launchDesktop, launchArguments, taskStatus };

@@ -51,7 +51,7 @@ async function install({ activate = true } = {}) {
 async function probe() {
   const root = win.installRoot();
   const environment = win.discoverEnvironment(win.readJson(path.join(root, 'settings.json'), {}));
-  const client = new AppServerClient({ command: environment.codexBin, requestTimeoutMs: 20000 });
+  const client = new AppServerClient({ command: environment.codexBin, requestTimeoutMs: 20000, ...win.discoverQuotaNetwork() });
   client.on('server-exit', () => {});
   try {
     await client.start();

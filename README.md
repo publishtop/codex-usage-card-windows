@@ -1,8 +1,8 @@
 # Codex Usage Card for Windows
 
-基于 [Lorie7813/codex-usage-card](https://github.com/Lorie7813/codex-usage-card) 的社区 Windows 移植，保留原版侧栏双圆环外观。当前版本：**0.9.4-win.9（Windows 公开测试版）**。
+基于 [Lorie7813/codex-usage-card](https://github.com/Lorie7813/codex-usage-card) 的社区 Windows 移植，保留原版侧栏双圆环外观。当前版本：**0.9.4-win.10（Windows 公开测试版）**。
 
-本项目由社区维护，与 OpenAI 及上游作者的官方 Windows 发行无关。首次公开发布建议使用 GitHub Pre-release，便于收集不同电脑上的兼容性反馈。
+本项目由社区维护，与 OpenAI 及上游作者的官方 Windows 发行无关。当前仍以 GitHub Pre-release 发布，便于收集不同电脑上的兼容性反馈。
 
 ## 效果示例
 
@@ -14,7 +14,7 @@
 
 - 侧栏展示五小时与每周剩余额度，悬浮查看重置时间与最近成功读取时间。
 - 每10秒主动读取，收到额度变化通知时立即更新。查询不调用模型推理。
-- 读取失败或连续30秒未更新时显示未知，避免长期保留过期百分比。
+- 临时失败时保留最近30秒内的成功结果并显示重试提示；超过30秒或登录失效时显示未知。
 - 支持原有 GPT / Codex 桌面、开始菜单及任务栏入口，不创建独立桌面图标。
 - 启动接管重新发现当前商店包和受管 CLI，兼容版本目录更新。
 
@@ -43,6 +43,10 @@ node .\manage.cjs install
 
 安装目录：`%USERPROFILE%\.codex\addons\codex-usage-card`。登录后台任务：`\CodexUsageCard\Agent`。安装为当前用户配置后台任务；受管电脑的权限或策略可能限制安装。
 
+### 从旧版升级
+
+下载并完整解压新版，运行新版目录中的 `Install.cmd` 即可覆盖本工具的已安装文件并重载后台，不需要先卸载。若当前窗口已经连接卡片，后台会更新组件；若安装器提示需要启用连接，请先保存工作再选择是否正常重启。使用 `Status.cmd` 或 `node manage.cjs status` 检查版本是否为 `0.9.4-win.10`。
+
 ## 检查与排障
 
 ```powershell
@@ -55,6 +59,12 @@ node .\manage.cjs verify
 - `verify`：当前真实侧栏的位置、唯一性和新鲜数值都通过时返回0，否则返回2。
 - 若关闭窗口后未自动重开，应用可能仍在后台运行；先检查 `status` 的阶段。
 - 诊断文件位于安装目录。提交 Issue 时只提供必要错误信息，先移除账户信息、会话内容、令牌和个人路径。
+
+win.10 修复了短暂读取失败就立即清空数字、慢请求阻塞界面检查，以及连续复用异常读取连接的问题。单次请求等待20秒，连接发送失败立即重建额度读取进程；首次失败3秒后重试，之后退避至6秒、10秒，登录失败或接口限流等待60秒。近期数据的成功读取时间不会因重试而延后，30秒过期保护保持生效。
+
+额度进程保留已有代理环境变量；没有时沿用当前用户已启用的 Windows 固定 HTTP/HTTPS 代理。代理仅传给额度子进程，PAC 仍由原有解析器处理，每分钟重新发现设置。该子进程临时使用 `features.respect_system_proxy=false` 让显式环境代理生效，不修改系统代理、全局配置或 GPT 主进程，也不硬编码代理地址。
+
+`usage-diagnostics.json` 最多保留120条请求成功/错误类别、耗时和数字错误码，不记录账号、令牌、代理地址或接口原始响应。`state.json` 的 `quotaNetworkMode` 只记录代理来源类别。其他诊断文件仍可能含个人路径或额度信息，请勿直接公开整个安装目录。
 
 后台不会接管安装前已经打开的工作窗口。新启动时，后台在原生窗口准备好且尚未进入工作前尝试正常退出与重开；应用拒绝、已开始输入、观察不可靠、多实例或端口冲突等情况会跳过，不强制结束进程。
 
@@ -77,7 +87,7 @@ node .\manage.cjs uninstall
 ## 开发与验证
 
 ```powershell
-node --test tests/core.test.cjs tests/native-startup.test.cjs tests/distribution.test.cjs
+node --test tests/core.test.cjs tests/native-startup.test.cjs tests/distribution.test.cjs tests/usage-reliability.test.cjs
 ```
 
 浏览器测试需自行安装 Playwright 与 Edge；原生生命周期测试应使用 `TEST_BRIDGE` 隔离构建，只识别测试程序。详见 [验证范围](TEST-RESULTS.md)。

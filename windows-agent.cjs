@@ -2,11 +2,11 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const win = require('./windows.cjs');
-const { AppServerClient, RendererInjector, formatRateLimits, unavailableValue } = require('./agent.cjs');
+const { AppServerClient, RendererInjector, formatRateLimits, unavailableValue, valueAfterReadFailure, usageErrorKind, usageErrorInfo, usageRetryDelayMs } = require('./agent.cjs');
 const { startNativeStartup } = require('./native-startup.cjs');
 
 function cardMatches(status, value) {
-  if (!status?.placed || status.badgeCount !== 1 || status.stale || status.version !== 54 || status.mode !== value?.mode) return false;
+  if (!status?.placed || status.badgeCount !== 1 || status.stale || status.version !== 55 || status.mode !== value?.mode) return false;
   if (!Number.isFinite(value.updatedAt) || Date.now() - value.updatedAt > 30000) return false;
   if (value.mode === 'dual') return value.rings?.some(ring => Number.isFinite(ring.percent)) &&
     value.rings.every((ring, index) => status.rings?.[index]?.key === ring.key && status.rings[index].percent === ring.percent);
@@ -28,10 +28,21 @@ async function run() {
   const injector = new RendererInjector({ port: win.PORT });
   injector.currentValue = { percent: null, title: '正在读取 Codex 剩余用量', tone: 'muted', windowLabel: '', stale: true };
   let client = null, lastRead = 0, stopped = false, ticking = false, lastDiscovery=0, lastScan=0, usageError=null;
+  let reading = false, epoch = 0, lastReadDurationMs = null, consecutiveReadFailures = 0;
+  let network = null;
+  const readEvents = [];
+  function recordRead(ok, error, durationMs) {
+    readEvents.push({ at: new Date().toISOString(), ok, ...(error ? usageErrorInfo(error) : {kind:null}), durationMs });
+    if (readEvents.length > 120) readEvents.shift();
+    win.writeJson(path.join(root, 'usage-diagnostics.json'), { owner: win.OWNER, events: readEvents });
+  }
   let phase = 'waiting-for-debug-endpoint';
   let publishQueue = Promise.resolve();
   function publish(response) {
-    const next = { ...formatRateLimits(response), updatedAt: Date.now(), stale: false };
+    const formatted = formatRateLimits(response);
+    const known = Number.isFinite(formatted.percent) || formatted.rings?.some(ring => Number.isFinite(ring.percent));
+    const next = known ? { ...formatted, updatedAt: Date.now(), stale: false, refreshError: null } :
+      unavailableValue(injector.currentValue, '用量接口未返回可用额度，正在自动重试');
     publishQueue = publishQueue.catch(() => {}).then(() => injector.update(next));
     return publishQueue;
   }
@@ -53,29 +64,48 @@ async function run() {
     phase = 'launching';
   }
   async function readUsage() {
-    if (!injector.sessions.size || Date.now() - lastRead < settings.pollMs) return;
+    if (reading || !injector.sessions.size || Date.now() - lastRead < settings.pollMs) return;
+    reading = true;
+    const attemptEpoch = epoch;
+    const startedAt = Date.now();
+    let ready = !!client;
     lastRead = Date.now();
     try {
       if(Date.now()-lastDiscovery>60000 || !win.executable(settings.codexBin) || !win.executable(settings.appPath)) {
         const environment=win.discoverEnvironment(settings);lastDiscovery=Date.now();
-        if(client && settings.codexBin!==environment.codexBin){const old=client;client=null;old.stop();}
+        const nextNetwork=win.discoverQuotaNetwork();
+        if(client && (settings.codexBin!==environment.codexBin || JSON.stringify(network)!==JSON.stringify(nextNetwork))){const old=client;client=null;old.stop();}
+        network=nextNetwork;
         settings={...settings,...environment};win.writeJson(path.join(root,'settings.json'),settings);
       }
       if (!client) {
-        const current = new AppServerClient({ command: settings.codexBin, requestTimeoutMs: 8000 });
+        ready = false;
+        const current = new AppServerClient({ command: settings.codexBin, requestTimeoutMs: 20000, ...(network ?? win.discoverQuotaNetwork()) });
         client = current;
         current.on('rate-limits', response => { if (client === current) publish(response).catch(() => {}); });
         current.on('server-exit', () => { if (client === current) { client = null; lastRead = Date.now() - settings.pollMs + 10000; } });
         await current.start();
+        ready = true;
       } else await client.refresh();
-      if (client) await publish(client.rateLimits);
+      if (attemptEpoch !== epoch || stopped) return;
       usageError=null;
+      consecutiveReadFailures = 0;
+      lastReadDurationMs = Date.now() - startedAt;
+      recordRead(true, null, lastReadDurationMs);
     } catch (error) {
-      usageError=String(error.message).slice(0,240);
-      const old = client; client = null; old?.stop();
-      lastRead = Date.now() - settings.pollMs + 10000;
-      await injector.update(unavailableValue(injector.currentValue));
-    }
+      if (attemptEpoch !== epoch || stopped) return;
+      usageError=usageErrorKind(error);
+      consecutiveReadFailures++;
+      lastReadDurationMs = Date.now() - startedAt;
+      recordRead(false, error, lastReadDurationMs);
+      // A broken network pool must be rebuilt; a healthy initialized transport may retry a timeout.
+      if (!ready || !client?.child || usageError === 'connection' || usageError === 'authentication' || consecutiveReadFailures >= 3) {
+        const old = client; client = null; old?.stop();
+      }
+      lastRead = Date.now() - settings.pollMs + usageRetryDelayMs(error, consecutiveReadFailures);
+      await publishQueue.catch(() => {});
+      await injector.update(valueAfterReadFailure(injector.currentValue, error));
+    } finally { reading = false; }
   }
   async function tick() {
     if (ticking || stopped) return;
@@ -86,11 +116,13 @@ async function run() {
       await pendingActivation();
       if (!injector.sessions.size) {
         if(!win.readJson(path.join(root,'activate-after-exit.json')))phase='waiting-for-native-startup';
+        if (client) epoch++;
         const old = client; client = null; old?.stop(); lastRead = 0;
         injector.currentValue = unavailableValue(injector.currentValue);
       } else {
         phase = 'connected';
-        await readUsage();
+        // Reads can take seconds. Renderer checks and heartbeat must keep running meanwhile.
+        readUsage().catch(() => {});
         await publishQueue.catch(() => {});
       }
       const windows = [];
@@ -101,8 +133,8 @@ async function run() {
       const integrated = windows.length > 0 && windows.every(status => cardMatches(status, injector.currentValue));
       if (integrated) phase = 'verified';
       win.writeJson(path.join(root, 'state.json'), { owner: win.OWNER, version: win.VERSION, pid: process.pid, updatedAt: Date.now(), phase, integrated,
-        value: injector.currentValue, windows, problem, usageError });
-      if (integrated) win.writeJson(path.join(root, 'verification.json'), { owner: win.OWNER, at: new Date().toISOString(), ok: true, uiVersion: 54,
+        value: injector.currentValue, windows, problem, usageError, readingUsage: reading, lastReadDurationMs, consecutiveReadFailures, quotaNetworkMode:network?.source??'default' });
+      if (integrated) win.writeJson(path.join(root, 'verification.json'), { owner: win.OWNER, at: new Date().toISOString(), ok: true, uiVersion: 55,
         windowCount: windows.length, duplicateCards: false, value: injector.currentValue });
     } catch (error) {
       win.writeJson(path.join(root, 'state.json'), { owner: win.OWNER, version: win.VERSION, pid: process.pid, updatedAt: Date.now(), phase: 'retrying', integrated: false,

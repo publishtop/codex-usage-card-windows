@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const { chromium } = require('playwright');
-const { buildBootstrapScript, formatRateLimits, unavailableValue } = require('../agent.cjs');
+const { buildBootstrapScript, formatRateLimits, unavailableValue, valueAfterReadFailure } = require('../agent.cjs');
 
 async function main() {
   const edge = process.env.WSC_TEST_BROWSER || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
@@ -36,6 +36,13 @@ async function main() {
     assert.match(await page.locator('#codex-usage-tooltip').innerText(), /5h额度/);
     assert.match(await page.locator('#codex-usage-tooltip').innerText(), /周额度/);
     assert.match(await page.locator('#codex-usage-tooltip').innerText(), /最近成功读取：.+每10秒刷新/);
+    const delayed = valueAfterReadFailure(fresh(), new Error('read timed out'));
+    await update(delayed);
+    assert.deepEqual(await badge.locator('.usage-number').allTextContents(), ['82%', '74%']);
+    assert.match(await page.locator('#codex-usage-tooltip').innerText(), /更新暂时延迟/);
+    assert.equal(await page.evaluate(() => window.__codexUsageBadge.status().updatedAt), delayed.updatedAt);
+    await update(fresh());
+    assert.doesNotMatch(await page.locator('#codex-usage-tooltip').innerText(), /更新暂时延迟/);
     await page.keyboard.press('Escape');
     await page.locator('#codex-usage-tooltip').waitFor({ state: 'hidden' });
     const output = process.env.WSC_TEST_OUTPUT || path.join(__dirname, 'browser-artifacts');
@@ -75,7 +82,7 @@ async function main() {
     assert.equal(await page.locator('#codex-usage-badge').count(), 0);
     assert.equal(await page.locator('#codex-usage-badge-style').count(), 0);
     assert.deepEqual(failures, []);
-    process.stdout.write(JSON.stringify({ ok: true, checks: ['dual rings', 'idempotent injection', 'keyboard tooltip', 'last successful read timestamp', '30-second dead-agent expiry', 'light/dark rendering', 'sidebar replacement', 'zero/unknown distinction', 'text escaping', 'narrow viewport', 'clean uninstall'], screenshots: output }, null, 2) + '\n');
+    process.stdout.write(JSON.stringify({ ok: true, checks: ['dual rings', 'idempotent injection', 'keyboard tooltip', 'last successful read timestamp', 'transient retry label and unchanged freshness', '30-second dead-agent expiry', 'light/dark rendering', 'sidebar replacement', 'zero/unknown distinction', 'text escaping', 'narrow viewport', 'clean uninstall'], screenshots: output }, null, 2) + '\n');
   } finally { await browser.close(); }
 }
 main().catch(error => { process.stderr.write(error.stack + '\n'); process.exitCode = 1; });
