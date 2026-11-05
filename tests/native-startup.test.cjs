@@ -66,6 +66,47 @@ function harness(states,{quit={accepted:true},recordFailure=false}={}){
   const controller=new NativeStartupController(adapter,{now:()=>clock,sleep:async ms=>{clock+=ms;}});
   return {calls,controller};
 }
+
+test('a refused startup exit does not put the next distinct launch into cooldown or retry the working window',async()=>{
+ const empty=snapshot({apps:[]}),next=snapshot({apps:[app({pid:43,key:'43:next'})],frontmostPid:43});
+ const h=harness([empty,snapshot(),snapshot(),next],{quit:{accepted:false,reason:'input-or-process-changed'}});
+ await h.controller.tick();await h.controller.tick();await h.controller.tick();await h.controller.tick();
+ assert.equal(h.calls.filter(c=>c[0]==='quit').length,2);
+ assert.equal(h.controller.lastAttemptAt,0);
+ assert.ok(h.calls.filter(c=>c[1]==='quit-refused').every(c=>c[2].lastAttemptAt===0));
+ assert.ok(!h.calls.some(c=>c[1]==='skipped'&&c[2]?.reason==='cooldown'));
+});
+
+test('accepted exits retain the durable cooldown even when reopening fails',async()=>{
+ const h=harness([snapshot({apps:[]}),snapshot(),snapshot({apps:[app({pid:99,key:'99:other'})]})]);
+ await h.controller.tick();await h.controller.tick();
+ assert.equal(h.controller.lastAttemptAt,now);
+ assert.equal(h.calls.filter(c=>c[0]==='quit').length,1);
+ assert.ok(!h.calls.some(c=>c[0]==='launch'));
+});
+
+test('native startup persists a zero cooldown after a refused exit',async t=>{
+ const fs=require('node:fs'),path=require('node:path'),os=require('node:os');
+ const {NativeBridgeClient,startNativeStartup}=require('../native-startup.cjs');
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'usage-card-refusal-state-'));
+ const original=NativeBridgeClient.prototype.request;let calls=0,monitor;
+ t.mock.method(require('node:net'),'createServer',()=>({once(){return this;},listen(options,ready){queueMicrotask(ready);return this;},close(done){done();}}));
+ fs.writeFileSync(path.join(root,'settings.json'),JSON.stringify({nativeBridge:path.join(root,'startup-bridge-aaaaaaaaaaaa.exe')}));
+ NativeBridgeClient.prototype.request=async function(action){
+  if(action==='quit')return {accepted:false,reason:'input-or-process-changed'};
+  const time=Date.now();return ++calls===1?snapshot({apps:[]}):snapshot({apps:[app({launchedAt:time-1000})]});
+ };
+ try{
+  monitor=startNativeStartup(root);
+  const deadline=Date.now()+2000;let state;
+  while(Date.now()<deadline){await new Promise(r=>setTimeout(r,20));try{state=JSON.parse(fs.readFileSync(path.join(root,'native-startup-state.json'),'utf8'));}catch{}if(state?.lastEvent?.phase==='quit-refused')break;}
+  assert.equal(state.lastEvent.phase,'quit-refused');assert.equal(state.lastAttemptAt,0);
+ }finally{
+  monitor?.stop();NativeBridgeClient.prototype.request=original;
+  for(const file of ['settings.json','native-startup-state.json','logs/native-startup.jsonl']){const target=path.join(root,file);if(fs.existsSync(target))fs.unlinkSync(target);}
+  if(fs.existsSync(path.join(root,'logs')))fs.rmdirSync(path.join(root,'logs'));fs.rmdirSync(root);
+ }
+});
 test('worker installation baselines and never interrupts an already-open work window',async()=>{
   const h=harness([snapshot()]);await h.controller.tick();await h.controller.tick();
   assert.ok(!h.calls.some(c=>c[0]==='quit'||c[0]==='launch'));

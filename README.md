@@ -1,8 +1,15 @@
 # Codex Usage Card for Windows
 
-基于 [Lorie7813/codex-usage-card](https://github.com/Lorie7813/codex-usage-card) 的社区 Windows 移植，保留原版侧栏双圆环外观。当前版本：**0.9.4-win.10（Windows 公开测试版）**。
+基于 [Lorie7813/codex-usage-card](https://github.com/Lorie7813/codex-usage-card) 的社区 Windows 移植，保留原版侧栏双圆环外观。当前版本：**0.9.4-win.11（11.06 更新版，公开测试版）**，更新日期：**2026-11-06**。
 
 本项目由社区维护，与 OpenAI 及上游作者的官方 Windows 发行无关。当前仍以 GitHub Pre-release 发布，便于收集不同电脑上的兼容性反馈。
+
+## 11.06 更新内容
+
+- 修复启动接管被拒绝、应用实际没有退出时仍保留两分钟全局冷却，导致下一次正常启动无法显示卡片的问题。
+- 正确保存清零后的冷却时间；同一个被拒绝的工作窗口仍不会被反复接管，已接受或结果未知的退出仍保留冷却保护。
+- 后台原生元数据助手请求超时后自动重建，停止旧助手时取消其挂起请求，避免旧计时器影响新连接。只回收本工具创建的助手进程。
+- 保留 win.10 的额度读取、代理、断线重连及30秒过期保护。本版未改变卡片布局或更新按钮处理。
 
 ## 效果示例
 
@@ -45,7 +52,7 @@ node .\manage.cjs install
 
 ### 从旧版升级
 
-下载并完整解压新版，运行新版目录中的 `Install.cmd` 即可覆盖本工具的已安装文件并重载后台，不需要先卸载。若当前窗口已经连接卡片，后台会更新组件；若安装器提示需要启用连接，请先保存工作再选择是否正常重启。使用 `Status.cmd` 或 `node manage.cjs status` 检查版本是否为 `0.9.4-win.10`。
+下载并完整解压新版，运行新版目录中的 `Install.cmd` 即可覆盖本工具的已安装文件并重载后台，不需要先卸载。若当前窗口已经连接卡片，后台会更新组件；若安装器提示需要启用连接，请先保存工作再选择是否正常重启。使用 `Status.cmd` 或 `node manage.cjs status` 检查版本是否为 `0.9.4-win.11`。
 
 ## 检查与排障
 
@@ -87,7 +94,7 @@ node .\manage.cjs uninstall
 ## 开发与验证
 
 ```powershell
-node --test tests/core.test.cjs tests/native-startup.test.cjs tests/distribution.test.cjs tests/usage-reliability.test.cjs
+node --test tests/core.test.cjs tests/native-startup.test.cjs tests/native-bridge-recovery.test.cjs tests/distribution.test.cjs tests/usage-reliability.test.cjs
 ```
 
 浏览器测试需自行安装 Playwright 与 Edge；原生生命周期测试应使用 `TEST_BRIDGE` 隔离构建，只识别测试程序。详见 [验证范围](TEST-RESULTS.md)。

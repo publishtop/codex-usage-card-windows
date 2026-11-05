@@ -5,7 +5,7 @@ const os = require('node:os');
 const { execFileSync, spawn } = require('node:child_process');
 
 const OWNER = 'codex-usage-card-windows-v1';
-const VERSION = '0.9.4-win.10';
+const VERSION = '0.9.4-win.11';
 const PORT = 39222;
 const installRoot = () => path.resolve(process.env.CODEX_USAGE_CARD_HOME || path.join(os.homedir(), '.codex', 'addons', 'codex-usage-card'));
 const powershellPath = () => path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');

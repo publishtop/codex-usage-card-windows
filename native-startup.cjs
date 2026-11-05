@@ -7,10 +7,10 @@ const { spawn } = require('node:child_process');
 const win = require('./windows.cjs');
 
 class NativeBridgeClient {
-  constructor(file) { this.file=file; this.child=null; this.pending=new Map(); this.serial=0; }
+  constructor(file,{spawnProcess=spawn,requestTimeoutMs=10000,quitTimeoutMs=45000}={}) { Object.assign(this,{file,spawnProcess,requestTimeoutMs,quitTimeoutMs}); this.child=null; this.pending=new Map(); this.serial=0; }
   request(action, extra={}) {
     if(!this.child) {
-      const child=spawn(this.file,[],{windowsHide:true,stdio:['pipe','pipe','ignore']}); this.child=child;
+      const child=this.spawnProcess(this.file,[],{windowsHide:true,stdio:['pipe','pipe','ignore']}); this.child=child;
       child.stdout.setEncoding('utf8');
       readline.createInterface({input:child.stdout}).on('line',line=>{
         let message;try{message=JSON.parse(line);}catch{return;}
@@ -21,14 +21,23 @@ class NativeBridgeClient {
       const failed=()=>{if(this.child!==child)return;this.child=null;for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(new Error('Native lifecycle bridge exited'));}this.pending.clear();};
       child.once('exit',failed);child.once('error',failed);child.stdin.on('error',()=>{});
     }
+    const requestedChild=this.child;
     const id=++this.serial;
     return new Promise((resolve,reject)=>{
-      const timer=setTimeout(()=>{this.pending.delete(id);reject(new Error('Native lifecycle request timed out'));},['quit','fixture-quit','user-requested-quit'].includes(action)?45000:10000);
+      const timer=setTimeout(()=>{
+        if(!this.pending.has(id))return;
+        if(this.child!==requestedChild){this.pending.delete(id);reject(new Error('Native lifecycle request timed out'));return;}
+        if(this.child===requestedChild)this.child=null;
+        const error=new Error('Native lifecycle request timed out');
+        for(const item of this.pending.values()){clearTimeout(item.timer);item.reject(error);}this.pending.clear();
+        // Only recycle the lifecycle helper created by this client, never an app process.
+        requestedChild.stdin.end();requestedChild.kill();
+      },action==='quit'||action==='fixture-quit'?this.quitTimeoutMs:this.requestTimeoutMs);
       this.pending.set(id,{resolve,reject,timer});
       this.child.stdin.write(JSON.stringify({id,action,...extra})+'\n');
     });
   }
-  stop(){this.child?.stdin.end();this.child=null;}
+  stop(){const child=this.child;this.child=null;for(const item of this.pending.values()){clearTimeout(item.timer);item.reject(new Error('Native lifecycle bridge stopped'));}this.pending.clear();child?.stdin.end();child?.kill();}
 }
 
 function launchDecision(snapshot, seen, now, lastAttemptAt=0) {
@@ -78,12 +87,17 @@ class NativeStartupController {
         return;
       }
       if(await this.adapter.portInUse()){await this.adapter.record('port-in-use');return;}
+      const previousAttemptAt=this.lastAttemptAt;
       this.lastAttemptAt=this.now();
       // Persist before any lifecycle action, so a worker crash cannot produce a restart loop.
       await this.adapter.record('attempt',{lastAttemptAt:this.lastAttemptAt,processKey:decision.app.key});
       if(this.stopped)return;
       const result=await this.adapter.quit(decision.app,snapshot.inputStamp);
-      if(!result.accepted){await this.adapter.record('quit-refused',{reason:result.reason});return;}
+      if(!result.accepted){
+        // No exit was committed: keep this process seen, but do not penalize the next new launch.
+        this.lastAttemptAt=previousAttemptAt;
+        await this.adapter.record('quit-refused',{reason:result.reason,processKey:decision.app.key,lastAttemptAt:previousAttemptAt});return;
+      }
       const deadline=this.now()+10000;let absent=false;
       while(!this.stopped&&this.now()<deadline){
         const current=await this.adapter.snapshot();
@@ -112,7 +126,7 @@ function startNativeStartup(root) {
     snapshot:()=>bridge.request('snapshot'), portInUse:()=>portInUse(win.PORT),
     verifiedSince:at=>{const proof=win.readJson(path.join(root,'verification.json'));return at>0&&proof?.ok===true&&Date.parse(proof.at)>at;},
     quit:(app,inputStamp)=>bridge.request('quit',{pid:app.pid,key:app.key,inputStamp}),
-    record:async(phase,details={})=>{lastAttemptAt=details.lastAttemptAt||lastAttemptAt;if(phase!=='watching'){lastEvent={phase,at:Date.now(),...details};const trace=path.join(root,'logs','native-startup.jsonl');fs.mkdirSync(path.dirname(trace),{recursive:true});if(fs.existsSync(trace)&&fs.statSync(trace).size>262144){fs.rmSync(trace+'.previous',{force:true});fs.renameSync(trace,trace+'.previous');}fs.appendFileSync(trace,JSON.stringify(lastEvent)+'\n');}win.writeJson(file,{owner:win.OWNER,phase,at:Date.now(),lastAttemptAt,lastEvent,...details});},
+    record:async(phase,details={})=>{if(Number.isFinite(details.lastAttemptAt)&&details.lastAttemptAt>=0)lastAttemptAt=details.lastAttemptAt;if(phase!=='watching'){lastEvent={phase,at:Date.now(),...details};const trace=path.join(root,'logs','native-startup.jsonl');fs.mkdirSync(path.dirname(trace),{recursive:true});if(fs.existsSync(trace)&&fs.statSync(trace).size>262144){fs.rmSync(trace+'.previous',{force:true});fs.renameSync(trace,trace+'.previous');}fs.appendFileSync(trace,JSON.stringify(lastEvent)+'\n');}win.writeJson(file,{owner:win.OWNER,phase,at:Date.now(),lastAttemptAt,lastEvent,...details});},
     launch:async()=>{
       // Always resolve the current registered package and CLI, even after a Store update.
       const settings=win.readJson(path.join(root,'settings.json'));

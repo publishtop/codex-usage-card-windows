@@ -1,10 +1,22 @@
-# Validation scope — 0.9.4-win.10 public preview
+# Validation scope — 0.9.4-win.11 / 11.06 更新版
+
+## 2026-11-06 startup recovery
+
+The current public source passed all40 Node tests, including37 core/startup/transport regressions and3 public distribution checks. The persistence regression mocks port availability, so it does not depend on whether a real card endpoint is running.
+
+The win.11 core passed37 Node tests. New coverage proves that an explicit refused, uncommitted exit restores the prior global cooldown while keeping the same working process excluded; a subsequent distinct launch is eligible, zero cooldown is persisted, and accepted exits retain protection. Additional transport checks prove that a timed-out owned metadata helper is recycled and stopping an old helper cancels its pending timers without damaging a new helper. No production app is a unit-test fixture.
+
+An actual user-authorized normal exit and independently armed normal reopen restored one placed UI55 card with fresh quota; the user confirmed display. Further successful quota reads continued. The temporary recovery task completed successfully and was removed; the persistent Agent remained running. No forced app termination, signed-bundle modification or global proxy/security change was used.
+
+This release does not claim a new physical taskbar click or full unflagged cold-start acceptance after the win.11 change. Cross-computer installation is still unverified. Native helper C# sources and public installer compatibility remain unchanged; the JavaScript metadata client recovery changed.
+
+## Prior win.10 validation
 
 Test date:2026-11-04. Environment:Windows11 x64, Node.js24, .NET Framework and the OpenAI.Codex Store desktop app. This remains a single-computer report.
 
 ## Quota-read repair
 
-The repaired core passed32 Node regressions. All35 current public-tree Node tests passed, including3 distribution checks for unsupported runtimes, restart consent and a real native windowless host launching Node from a Chinese/space path. This includes the code shipped in this release, rather than only the private working tree.
+The win.10 repaired core passed32 Node regressions and its public tree passed35 Node tests, including3 distribution checks for unsupported runtimes, restart consent and a real native windowless host launching Node from a Chinese/space path.
 
 New checks cover a real JSONL response delayed8.5seconds (the previous8s deadline fails; the20s deadline succeeds), single-flight asynchronous reads, heartbeat progress during requests, recent-value retention without changing its timestamp,30s expiry, immediate authentication invalidation,3/6/10s retries,60s authentication/rate-limit backoff, rebuilding a damaged network pool, stale-response isolation and inherited environment/fixed Windows proxy selection. PAC settings are not flattened.
 
@@ -34,6 +46,6 @@ There is no separate clean-OS or second-computer login validation in this report
 
 ## Reproducing
 
-Run: node --test tests/core.test.cjs tests/native-startup.test.cjs tests/distribution.test.cjs tests/usage-reliability.test.cjs
+Run: node --test tests/core.test.cjs tests/native-startup.test.cjs tests/native-bridge-recovery.test.cjs tests/distribution.test.cjs tests/usage-reliability.test.cjs
 
 Browser tests additionally require Playwright and Edge. Native tests compile StartupBridge.cs with TEST_BRIDGE and LifecycleFixture.cs in a separate test directory; set WSC_NATIVE_TEST_ROOT and run tests/native-lifecycle.cjs. Never substitute a production app as a test fixture.
